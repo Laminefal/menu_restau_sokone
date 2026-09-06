@@ -197,9 +197,12 @@ button {
   .home-restaurant-card button svg { width: 13px; height: 13px; }
 }
 .public-menu-item-action { display: grid; justify-items: end; gap: 7px; flex: 0 0 auto; }
+.public-menu-item-unavailable { opacity: .55; filter: grayscale(.35); }
+.public-menu-item-unavailable .public-menu-image { filter: grayscale(.45); }
 .add-to-cart-button, .order-submit-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; border: 0; border-radius: 6px; color: #fff; background: #e36d38; font: 600 11px 'DM Sans', sans-serif; }
 .add-to-cart-button { padding: 7px 9px; }
 .add-to-cart-button:hover, .order-submit-button:hover:not(:disabled) { background: #d65e2d; }
+.add-to-cart-button:disabled { cursor: not-allowed; color: #687386; background: #e5e8ed; }
 .order-panel { margin-top: 22px; padding: 16px; border: 1px solid #f2c4ad; border-radius: 9px; background: #fffaf6; }
 .order-panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .order-panel-heading h3 { display: flex; align-items: center; gap: 7px; margin: 0; color: #293448; font: 700 15px Manrope, sans-serif; }

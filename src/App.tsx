@@ -878,7 +878,6 @@ function App() {
         .from("menu_items")
         .select("id, name, description, price, image_url, is_available")
         .eq("menu_id", menu.id)
-        .eq("is_available", true)
         .order("created_at", { ascending: true }),
       supabase
         .from("restaurant_menu_days")
@@ -2487,7 +2486,7 @@ function App() {
                     <LoadingIndicator label="Chargement du menu du jour..." />
                   ) : publicMenuDishes.length ? (
                     publicMenuDishes.map((dish) => (
-                      <div className="public-menu-item" key={dish.id}>
+                      <div className={`public-menu-item ${dish.available ? "" : "public-menu-item-unavailable"}`} key={dish.id}>
                         <div className="public-menu-image">
                           {dish.photo_url ? (
                             <img
@@ -2508,8 +2507,9 @@ function App() {
                             className="add-to-cart-button"
                             type="button"
                             onClick={() => addToCart(dish)}
+                            disabled={!dish.available}
                           >
-                            <Plus size={14} /> Ajouter
+                            {dish.available ? <><Plus size={14} /> Ajouter</> : "En rupture"}
                           </button>
                         </div>
                       </div>
