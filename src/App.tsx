@@ -1,14 +1,18 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowUpRight,
+  BarChart3,
   Bell,
   CalendarDays,
   Check,
   ChevronDown,
   Copy,
   CircleHelp,
+  CircleDollarSign,
+  ClipboardList,
   Eye,
+  History,
   Home,
   ImagePlus,
   LayoutDashboard,
@@ -25,9 +29,11 @@ import {
   ShieldCheck,
   Store,
   ShoppingBag,
+  TrendingUp,
   Trash2,
   Utensils,
   UserRound,
+  WalletCards,
   X,
 } from "lucide-react";
 import { supabase } from "./lib/supabase";
@@ -66,6 +72,45 @@ type Dish = {
   today: boolean;
 };
 type CartItem = Dish & { quantity: number };
+type RestaurantOrder = {
+  id: number;
+  customer_name: string;
+  customer_phone: string;
+  delivery_address: string | null;
+  delivery_fee: number;
+  notes: string | null;
+  payment_method: "wave" | "sur_place";
+  status: string;
+  total_amount: number;
+  created_at: string;
+};
+type RestaurantExpense = {
+  id: number;
+  category: string;
+  amount: number;
+  expense_date: string;
+  description: string | null;
+  created_at: string;
+};
+type RestaurantDebt = {
+  id: number;
+  creditor: string;
+  amount: number;
+  description: string | null;
+  debt_date: string;
+  paid_at: string | null;
+  debt_type: "Je dois" | "On me doit";
+  status: "À payer" | "Payée";
+  created_at: string;
+};
+const orderStatuses = [
+  "En attente",
+  "Confirmée",
+  "En préparation",
+  "Prête",
+  "Livrée",
+  "Annulée",
+] as const;
 const ADMIN_EMAIL = "lamine180903@gmail.com";
 const ADMIN_PASSWORD = "Lamine180903";
 const menuIdCache = new Map<number, number>();
@@ -129,6 +174,23 @@ function App() {
   const [showRestaurateur, setShowRestaurateur] = useState(false);
   const [dishes, setDishes] = useState<Dish[]>([]);
   const [isDishesLoading, setIsDishesLoading] = useState(false);
+  const [restaurantOrders, setRestaurantOrders] = useState<RestaurantOrder[]>([]);
+  const [isOrdersLoading, setIsOrdersLoading] = useState(false);
+  const [orderHistoryOpen, setOrderHistoryOpen] = useState(false);
+  const [restaurantExpenses, setRestaurantExpenses] = useState<RestaurantExpense[]>([]);
+  const [isExpensesLoading, setIsExpensesLoading] = useState(false);
+  const [isSavingExpense, setIsSavingExpense] = useState(false);
+  const [expenseForm, setExpenseForm] = useState({
+    category: "Achats",
+    amount: "",
+    description: "",
+  });
+  const [restaurantPage, setRestaurantPage] = useState<"dashboard" | "menu" | "orders" | "expenses" | "debts">("dashboard");
+  const [restaurantDebts, setRestaurantDebts] = useState<RestaurantDebt[]>([]);
+  const [isDebtsLoading, setIsDebtsLoading] = useState(false);
+  const [isSavingDebt, setIsSavingDebt] = useState(false);
+  const [debtHistoryOpen, setDebtHistoryOpen] = useState(false);
+  const [debtForm, setDebtForm] = useState({ creditor: "", amount: "", description: "", debt_type: "Je dois" as "Je dois" | "On me doit" });
   const [dishModal, setDishModal] = useState<"add" | "edit" | null>(null);
   const [selectedDish, setSelectedDish] = useState<Dish | null>(null);
   const [dishForm, setDishForm] = useState({
@@ -146,6 +208,7 @@ function App() {
   const [customerPhone, setCustomerPhone] = useState("");
   const [isDeliverySelected, setIsDeliverySelected] = useState(false);
   const [deliveryAddress, setDeliveryAddress] = useState("");
+    const [orderNotes, setOrderNotes] = useState("");
   const [paymentMethod, setPaymentMethod] = useState<"wave" | "sur_place">("sur_place");
   const [isOrderSubmitting, setIsOrderSubmitting] = useState(false);
   const [orderSuccess, setOrderSuccess] = useState("");
@@ -157,12 +220,16 @@ function App() {
   const [trackingNumber, setTrackingNumber] = useState(
     () => localStorage.getItem("menu-sokone-last-order-number") ?? "",
   );
+  const [trackingPhone, setTrackingPhone] = useState("");
   const [numberCopied, setNumberCopied] = useState(false);
   const [trackedOrder, setTrackedOrder] = useState<{
     id: number;
+    restaurantName: string;
     status: string;
     total_amount: number;
     created_at: string;
+    notes: string | null;
+    items: Array<{ name: string; quantity: number; unit_price: number }>;
   } | null>(null);
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [trackingError, setTrackingError] = useState("");
@@ -170,6 +237,14 @@ function App() {
     null,
   );
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const notificationAudio = useRef<HTMLAudioElement | null>(null);
+  const playOrderNotification = () => {
+    const audio = notificationAudio.current ?? new Audio("/sounds/new-order.mp3");
+    notificationAudio.current = audio;
+    audio.volume = 1;
+    audio.currentTime = 0;
+    void audio.play().catch(() => undefined);
+  };
   const ensureRestaurantMenu = async (restaurantId: number) => {
     if (!supabase) return null;
     const cachedMenuId = menuIdCache.get(restaurantId);
@@ -422,6 +497,240 @@ function App() {
   }, [currentRestaurant?.id, showRestaurateur]);
 
   useEffect(() => {
+    const loadRestaurantOrders = async () => {
+      if (!showRestaurateur || !currentRestaurant || !supabase) return;
+      setIsOrdersLoading(true);
+      const { data, error: ordersError } = await supabase
+        .from("orders")
+        .select("id, customer_name, customer_phone, delivery_address, notes, delivery_fee, payment_method, status, total_amount, created_at")
+        .eq("restaurant_id", currentRestaurant.id)
+        .order("created_at", { ascending: false });
+      if (ordersError) {
+        setError(`Impossible de charger les commandes : ${ordersError.message}`);
+      } else {
+        setRestaurantOrders(
+          (data ?? []).map((order) => ({
+            ...order,
+            delivery_fee: Number(order.delivery_fee ?? 0),
+            total_amount: Number(order.total_amount ?? 0),
+            payment_method: order.payment_method === "wave" ? "wave" : "sur_place",
+          })),
+        );
+      }
+      setIsOrdersLoading(false);
+    };
+
+    void loadRestaurantOrders();
+  }, [currentRestaurant?.id, showRestaurateur]);
+
+  useEffect(() => {
+    if (!showRestaurateur || !currentRestaurant) return;
+    const unlockAudio = () => {
+      void notificationAudio.current?.load();
+    };
+    window.addEventListener("pointerdown", unlockAudio);
+    window.addEventListener("keydown", unlockAudio);
+    return () => {
+      window.removeEventListener("pointerdown", unlockAudio);
+      window.removeEventListener("keydown", unlockAudio);
+    };
+  }, [currentRestaurant?.id, showRestaurateur]);
+
+  useEffect(() => {
+    if (!supabase || !showRestaurateur || !currentRestaurant) return;
+    const supabaseClient = supabase;
+    const orderChannel = supabaseClient
+      .channel(`orders-live-${currentRestaurant.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "orders",
+          filter: `restaurant_id=eq.${currentRestaurant.id}`,
+        },
+        (payload) => {
+          const record = payload.new as RestaurantOrder;
+          const nextOrder: RestaurantOrder = {
+            ...record,
+            delivery_fee: Number(record.delivery_fee ?? 0),
+            total_amount: Number(record.total_amount ?? 0),
+            payment_method: record.payment_method === "wave" ? "wave" : "sur_place",
+          };
+          setRestaurantOrders((current) => current.some((order) => order.id === nextOrder.id) ? current : [nextOrder, ...current]);
+          playOrderNotification();
+        },
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "orders",
+          filter: `restaurant_id=eq.${currentRestaurant.id}`,
+        },
+        (payload) => {
+          const record = payload.new as RestaurantOrder;
+          setRestaurantOrders((current) => current.map((order) => order.id === record.id ? {
+            ...order,
+            ...record,
+            delivery_fee: Number(record.delivery_fee ?? order.delivery_fee),
+            total_amount: Number(record.total_amount ?? order.total_amount),
+            payment_method: record.payment_method === "wave" ? "wave" : "sur_place",
+          } : order));
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabaseClient.removeChannel(orderChannel);
+    };
+  }, [currentRestaurant?.id, showRestaurateur]);
+
+  useEffect(() => {
+    const loadRestaurantExpenses = async () => {
+      if (!showRestaurateur || !currentRestaurant || !supabase) return;
+      setIsExpensesLoading(true);
+      const { data, error: expensesError } = await supabase
+        .from("expenses")
+        .select("id, category, amount, expense_date, description, created_at")
+        .eq("restaurant_id", currentRestaurant.id)
+        .order("expense_date", { ascending: false })
+        .order("created_at", { ascending: false });
+      if (expensesError) {
+        setError(`Impossible de charger les dépenses : ${expensesError.message}`);
+      } else {
+        setRestaurantExpenses(
+          (data ?? []).map((expense) => ({
+            ...expense,
+            amount: Number(expense.amount),
+          })),
+        );
+      }
+      setIsExpensesLoading(false);
+    };
+
+    void loadRestaurantExpenses();
+  }, [currentRestaurant?.id, showRestaurateur]);
+
+  const saveExpense = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!supabase || !currentRestaurant) return;
+    const amount = Number(expenseForm.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError("Indiquez un montant de dépense valide.");
+      return;
+    }
+    setIsSavingExpense(true);
+    setError(null);
+    const { data, error: expenseError } = await supabase
+      .from("expenses")
+      .insert({
+        restaurant_id: currentRestaurant.id,
+        category: expenseForm.category,
+        amount,
+        description: expenseForm.description.trim() || null,
+      })
+      .select("id, category, amount, expense_date, description, created_at")
+      .single();
+    if (expenseError || !data) {
+      setError(expenseError?.message ?? "La dépense n’a pas pu être enregistrée.");
+    } else {
+      setRestaurantExpenses((current) => [{ ...data, amount: Number(data.amount) }, ...current]);
+      setExpenseForm({
+        category: "Achats",
+        amount: "",
+        description: "",
+      });
+    }
+    setIsSavingExpense(false);
+  };
+
+  useEffect(() => {
+    const loadRestaurantDebts = async () => {
+      if (!showRestaurateur || !currentRestaurant || !supabase) return;
+      setIsDebtsLoading(true);
+      const { data, error: debtsError } = await supabase
+        .from("debts")
+        .select("id, creditor, amount, description, debt_date, paid_at, debt_type, status, created_at")
+        .eq("restaurant_id", currentRestaurant.id)
+        .order("debt_date", { ascending: false })
+        .order("created_at", { ascending: false });
+      if (debtsError) {
+        setError(`Impossible de charger les dettes : ${debtsError.message}`);
+      } else {
+        setRestaurantDebts(
+          (data ?? []).map((debt) => ({
+            ...debt,
+            amount: Number(debt.amount),
+            debt_type: debt.debt_type === "On me doit" ? "On me doit" : "Je dois",
+            status: debt.status === "Payée" ? "Payée" : "À payer",
+          })),
+        );
+      }
+      setIsDebtsLoading(false);
+    };
+
+    void loadRestaurantDebts();
+  }, [currentRestaurant?.id, showRestaurateur]);
+
+  const saveDebt = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!supabase || !currentRestaurant) return;
+    const amount = Number(debtForm.amount);
+    if (!debtForm.creditor.trim() || !Number.isFinite(amount) || amount <= 0) {
+      setError("Indiquez un créancier et un montant de dette valide.");
+      return;
+    }
+    setIsSavingDebt(true);
+    setError(null);
+    const { data, error: debtError } = await supabase
+      .from("debts")
+      .insert({
+        restaurant_id: currentRestaurant.id,
+        creditor: debtForm.creditor.trim(),
+        amount,
+        description: debtForm.description.trim() || null,
+        debt_type: debtForm.debt_type,
+      })
+      .select("id, creditor, amount, description, debt_date, paid_at, debt_type, status, created_at")
+      .single();
+    if (debtError || !data) {
+      setError(debtError?.message ?? "La dette n’a pas pu être enregistrée.");
+    } else {
+      setRestaurantDebts((current) => [{ ...data, amount: Number(data.amount), paid_at: data.paid_at ?? null, debt_type: data.debt_type === "On me doit" ? "On me doit" : "Je dois", status: data.status === "Payée" ? "Payée" : "À payer" }, ...current]);
+      setDebtForm({ creditor: "", amount: "", description: "", debt_type: "Je dois" });
+    }
+    setIsSavingDebt(false);
+  };
+
+  const updateDebtStatus = async (debtId: number, status: "Payée") => {
+    if (!supabase) return;
+    const paidAt = status === "Payée" ? new Date().toISOString() : null;
+    const { error: debtError } = await supabase.from("debts").update({ status, paid_at: paidAt }).eq("id", debtId);
+    if (debtError) {
+      setError(`Statut de dette impossible à modifier : ${debtError.message}`);
+      return;
+    }
+    setRestaurantDebts((current) => current.map((debt) => debt.id === debtId ? { ...debt, status, paid_at: paidAt } : debt));
+  };
+
+  const updateOrderStatus = async (orderId: number, status: string) => {
+    if (!supabase) return;
+    const { error: statusError } = await supabase
+      .from("orders")
+      .update({ status })
+      .eq("id", orderId);
+    if (statusError) {
+      setError(`Statut de commande impossible à modifier : ${statusError.message}`);
+      return;
+    }
+    setRestaurantOrders((current) =>
+      current.map((order) => (order.id === orderId ? { ...order, status } : order)),
+    );
+  };
+
+  useEffect(() => {
     if (!supabase || !showRestaurateur || !menuId || !currentRestaurant) return;
     const supabaseClient = supabase;
     const today = new Date().toISOString().slice(0, 10);
@@ -539,6 +848,7 @@ function App() {
     setCustomerPhone("");
     setIsDeliverySelected(false);
     setDeliveryAddress("");
+    setOrderNotes("");
     setPaymentMethod("sur_place");
     setOrderSuccess("");
     setOrderError("");
@@ -626,6 +936,16 @@ function App() {
     event.preventDefault();
     if (!supabase || !selected || !cartItems.length) return;
 
+    const normalizedPhone = customerPhone.replace(/\s/g, "");
+    if (!customerName.trim() || !normalizedPhone || (isDeliverySelected && !deliveryAddress.trim())) {
+      setOrderError("Veuillez remplir tous les champs obligatoires.");
+      return;
+    }
+    if (!/^7\d{8}$/.test(normalizedPhone)) {
+      setOrderError("Le numéro doit commencer par 7 et contenir 9 chiffres, par exemple 7X XXX XX XX.");
+      return;
+    }
+
     setIsOrderSubmitting(true);
     setOrderError("");
     const dishesTotal = cartItems.reduce(
@@ -639,13 +959,14 @@ function App() {
       .insert({
         restaurant_id: selected.id,
         customer_name: customerName.trim(),
-        customer_phone: customerPhone.trim(),
+        customer_phone: normalizedPhone,
         delivery_address: isDeliverySelected ? deliveryAddress.trim() : null,
+        notes: orderNotes.trim() || null,
         delivery_fee: deliveryFee,
         payment_method: paymentMethod,
         total_amount: totalAmount,
       })
-      .select("id")
+      .select("id, status, total_amount, created_at, notes")
       .single();
     if (orderInsertError || !order) {
       setOrderError(
@@ -676,7 +997,17 @@ function App() {
     setCartItems([]);
     setOrderNumber(newOrderNumber);
     setTrackingNumber(newOrderNumber);
+    setTrackedOrder({
+      id: order.id,
+      restaurantName: selected.name,
+      status: order.status ?? "En attente",
+      total_amount: Number(order.total_amount ?? totalAmount),
+      created_at: order.created_at ?? new Date().toISOString(),
+      notes: orderNotes.trim() || null,
+      items: cartItems.map((item) => ({ name: item.name, quantity: item.quantity, unit_price: item.price })),
+    });
     setNumberCopied(false);
+    setTrackingPhone(normalizedPhone);
     setShowOrders(true);
     setModal(null);
     setIsOrderSubmitting(false);
@@ -690,10 +1021,16 @@ function App() {
     event.preventDefault();
     if (!supabase) return;
     const normalizedNumber = trackingNumber.trim().toUpperCase();
+    const normalizedPhone = trackingPhone.replace(/\s/g, "");
     const orderId = Number(normalizedNumber.replace(/^SM-/, ""));
     if (!Number.isInteger(orderId) || orderId <= 0) {
       setTrackedOrder(null);
       setTrackingError("Entrez un numéro de commande valide, par exemple SM-2847.");
+      return;
+    }
+    if (!/^7\d{8}$/.test(normalizedPhone)) {
+      setTrackedOrder(null);
+      setTrackingError("Entrez le numéro de téléphone utilisé pour la commande, avec 9 chiffres commençant par 7.");
       return;
     }
 
@@ -701,22 +1038,95 @@ function App() {
     setTrackingError("");
     const { data, error: trackingQueryError } = await supabase
       .from("orders")
-      .select("id, status, total_amount, created_at")
+      .select("id, restaurant_id, status, total_amount, created_at, notes")
       .eq("id", orderId)
+      .eq("customer_phone", normalizedPhone)
       .maybeSingle();
     if (trackingQueryError || !data) {
       setTrackedOrder(null);
       setTrackingError("Aucune commande trouvée avec ce numéro.");
     } else {
+      const { data: orderItems, error: itemsError } = await supabase
+        .from("order_items")
+        .select("menu_item_id, quantity, unit_price")
+        .eq("order_id", data.id);
+      if (itemsError) {
+        setTrackedOrder(null);
+        setTrackingError("Les détails de cette commande ne sont pas disponibles.");
+        setTrackingLoading(false);
+        return;
+      }
+      const menuItemIds = (orderItems ?? []).map((item) => item.menu_item_id);
+      const { data: menuItems, error: menuItemsError } = menuItemIds.length
+        ? await supabase.from("menu_items").select("id, name").in("id", menuItemIds)
+        : { data: [], error: null };
+      if (menuItemsError) {
+        setTrackedOrder(null);
+        setTrackingError("Les détails des plats ne sont pas disponibles.");
+        setTrackingLoading(false);
+        return;
+      }
+      const itemNames = new Map((menuItems ?? []).map((item) => [item.id, item.name]));
+      const { data: restaurant } = await supabase
+        .from("restaurants")
+        .select("name")
+        .eq("id", data.restaurant_id)
+        .maybeSingle();
       setTrackedOrder({
         id: data.id,
+        restaurantName: restaurant?.name ?? "Restaurant",
         status: data.status,
         total_amount: Number(data.total_amount),
         created_at: data.created_at,
+        notes: data.notes ?? null,
+        items: (orderItems ?? []).map((item) => ({
+          name: itemNames.get(item.menu_item_id) ?? "Plat",
+          quantity: item.quantity,
+          unit_price: Number(item.unit_price),
+        })),
       });
     }
     setTrackingLoading(false);
   };
+  useEffect(() => {
+    if (!supabase || !showOrders || !trackedOrder) return;
+    const supabaseClient = supabase;
+    const orderChannel = supabaseClient
+      .channel(`order-status-live-sync-${trackedOrder.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "orders",
+          filter: `id=eq.${trackedOrder.id}`,
+        },
+        (payload) => {
+          const record = payload.new as {
+            id?: number;
+            status?: string;
+            total_amount?: number;
+            created_at?: string;
+          };
+          if (record.id !== trackedOrder.id) return;
+          setTrackedOrder((current) =>
+            current
+              ? {
+                  ...current,
+                  status: record.status ?? current.status,
+                  total_amount: Number(record.total_amount ?? current.total_amount),
+                  created_at: record.created_at ?? current.created_at,
+                }
+              : current,
+          );
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabaseClient.removeChannel(orderChannel);
+    };
+  }, [showOrders, trackedOrder?.id]);
   useEffect(() => {
     if (!supabase || modal !== "details" || !selected || selected.status !== "active") return;
     const supabaseClient = supabase;
@@ -1174,6 +1584,282 @@ function App() {
   if (showRestaurateur && isAuthenticated) {
     const restaurateur = currentRestaurant ?? restaurants[0];
     const todayDishes = dishes.filter((dish) => dish.today);
+    const activeOrders = restaurantOrders.filter(
+      (order) => order.status !== "Livrée" && order.status !== "Annulée",
+    );
+    const archivedOrders = restaurantOrders.filter(
+      (order) => order.status === "Livrée" || order.status === "Annulée",
+    );
+    const renderOrderCard = (order: RestaurantOrder, isArchived = false) => (
+      <article className={`restaurant-order-card ${isArchived ? `restaurant-order-archived restaurant-order-${order.status === "Livrée" ? "delivered" : "cancelled"}` : ""}`} key={order.id}>
+        <div className="restaurant-order-heading">
+          <div>
+            <strong>{`SM-${String(order.id).padStart(4, "0")}`}</strong>
+            <span>{new Date(order.created_at).toLocaleString("fr-FR")}</span>
+          </div>
+          {isArchived ? (
+            <span className={`order-status-label order-status-${order.status === "Livrée" ? "delivered" : "cancelled"}`}>
+              {order.status}
+            </span>
+          ) : (
+            <div className="order-status-actions">
+              <select
+                className="active-order-status-select"
+                value={order.status}
+                onChange={(event) => updateOrderStatus(order.id, event.target.value)}
+                aria-label={`Étape de la commande SM-${String(order.id).padStart(4, "0")}`}
+              >
+                {orderStatuses.map((status) => <option key={status} value={status}>{status}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+        <div className="restaurant-order-details">
+          <div><span>Client</span><strong>{order.customer_name}</strong></div>
+          <div><span>Téléphone</span><strong>{order.customer_phone}</strong></div>
+          <div><span>Paiement</span><strong>{order.payment_method === "wave" ? "Wave" : "Paiement sur place"}</strong></div>
+          <div><span>Livraison</span><strong>{order.delivery_address ? order.delivery_address : "À retirer sur place"}</strong></div>
+          {order.notes && <div className="restaurant-order-note"><span>Note du client</span><strong>{order.notes}</strong></div>}
+        </div>
+        <div className="restaurant-order-total">Total : <strong>{order.total_amount.toLocaleString("fr-FR")} FCFA</strong></div>
+      </article>
+    );
+    if (restaurantPage === "dashboard") {
+      const confirmedOrders = restaurantOrders.filter((order) => order.status === "Confirmée");
+      const deliveredOrders = restaurantOrders.filter((order) => order.status === "Livrée");
+      const cancelledOrders = restaurantOrders.filter((order) => order.status === "Annulée");
+      const confirmedRevenue = confirmedOrders.reduce((total, order) => total + order.total_amount, 0);
+      const paidDebtRevenue = restaurantDebts.filter((debt) => debt.status === "Payée").reduce((total, debt) => total + debt.amount, 0);
+      const turnover = confirmedRevenue + paidDebtRevenue;
+      const chartDays = Array.from({ length: 7 }, (_, index) => {
+        const date = new Date();
+        date.setHours(12, 0, 0, 0);
+        date.setDate(date.getDate() - (6 - index));
+        return date;
+      });
+      const chartValues = chartDays.map((date) => {
+        const dayKey = date.toISOString().slice(0, 10);
+        return restaurantOrders.filter((order) => order.created_at.slice(0, 10) === dayKey).length;
+      });
+      const chartMax = Math.max(...chartValues, 1);
+      const chartPoints = chartValues.map((value, index) => `${18 + (index * 604) / 6},${188 - (value / chartMax) * 148}`).join(" ");
+      return (
+        <main className="restaurant-space">
+          <header className="restaurant-topbar"><div className="brand"><span className="brand-mark"><Store size={19} /></span><span>MENU RESTAURANT SOKONE</span></div><button className="restaurant-logout-button" onClick={handleLogout}>Se déconnecter</button></header>
+          <div className="restaurant-layout">
+            <aside className="restaurant-nav">
+              <div className="workspace-label">ESPACE RESTAURATEUR</div>
+              <button className="restaurant-nav-item restaurant-nav-active" onClick={() => setRestaurantPage("dashboard")}><LayoutDashboard size={18} /> Tableau de bord</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("menu")}><Utensils size={18} /> Mon menu</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("orders")}><ShoppingBag size={18} /> Commande {activeOrders.length > 0 && <span className="orders-notification-badge">{activeOrders.length}</span>}</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("expenses")}><WalletCards size={18} /> Dépenses</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("debts")}><WalletCards size={18} /> Dettes</button>
+              <button className="restaurant-nav-item restaurant-back-admin" onClick={() => setShowRestaurateur(false)}><LayoutDashboard size={18} /> Retour administration</button>
+            </aside>
+            <section className="restaurant-content restaurant-dashboard-content">
+              <div className="page-heading"><div><div className="eyebrow">ESPACE RESTAURATEUR</div><h1>Tableau de bord</h1><p>Suivez l’activité de votre restaurant en un coup d’œil.</p></div><div className="dashboard-refresh"><Activity size={15} /> Mis à jour automatiquement</div></div>
+              {error && <div className="notice notice-warning" role="alert">{error}</div>}
+              <div className="dashboard-stats-grid">
+                <div className="dashboard-stat-card dashboard-stat-revenue"><div className="dashboard-stat-icon"><CircleDollarSign size={20} /></div><div><span>Chiffre d’affaires</span><strong>{turnover.toLocaleString("fr-FR")} FCFA</strong><small>Commandes confirmées + dettes réglées</small></div></div>
+                <div className="dashboard-stat-card"><div className="dashboard-stat-icon"><ClipboardList size={20} /></div><div><span>Nombre de commandes</span><strong>{restaurantOrders.length}</strong><small>Toutes les commandes reçues</small></div></div>
+                <div className="dashboard-stat-card dashboard-stat-confirmed"><div className="dashboard-stat-icon"><TrendingUp size={20} /></div><div><span>Commandes livrées</span><strong>{deliveredOrders.length}</strong><small>{deliveredOrders.reduce((total, order) => total + order.total_amount, 0).toLocaleString("fr-FR")} FCFA livrés</small></div></div>
+                <div className="dashboard-stat-card dashboard-stat-cancelled"><div className="dashboard-stat-icon"><X size={20} /></div><div><span>Commandes annulées</span><strong>{cancelledOrders.length}</strong><small>Commandes non finalisées</small></div></div>
+              </div>
+              <section className="dashboard-chart-panel"><div className="dashboard-panel-heading"><div><h2>Croissance des commandes</h2><p>Nombre de commandes reçues sur les 7 derniers jours.</p></div><BarChart3 size={21} /></div><div className="orders-chart"><svg viewBox="0 0 640 220" role="img" aria-label="Courbe de croissance des commandes"><line x1="18" y1="188" x2="622" y2="188" className="chart-axis" /><polyline points={chartPoints} className="chart-line" /><polygon points={`18,188 ${chartPoints} 622,188`} className="chart-area" />{chartValues.map((value, index) => { const x = 18 + (index * 604) / 6; const y = 188 - (value / chartMax) * 148; return <g key={chartDays[index].toISOString()}><circle cx={x} cy={y} r="4" className="chart-point" /><text x={x} y="210" textAnchor="middle" className="chart-label">{chartDays[index].toLocaleDateString("fr-FR", { weekday: "short" }).replace(".", "")}</text><text x={x} y={Math.max(y - 10, 14)} textAnchor="middle" className="chart-value">{value}</text></g>; })}</svg></div></section>
+            </section>
+          </div>
+        </main>
+      );
+    }
+    if (restaurantPage === "debts") {
+      const unpaidDebts = restaurantDebts.filter((debt) => debt.status === "À payer");
+      const paidDebts = restaurantDebts.filter((debt) => debt.status === "Payée");
+      const unpaidTotal = unpaidDebts.reduce((total, debt) => total + debt.amount, 0);
+      const renderDebtItem = (debt: RestaurantDebt, isHistory = false) => (
+        <article className={`expense-item debt-item ${isHistory ? "debt-paid" : "debt-unpaid"}`} key={debt.id}>
+          <div className="debt-item-main">
+            <strong>{debt.creditor}</strong>
+            <span>{debt.debt_type} · {new Date(`${debt.debt_date}T12:00:00`).toLocaleDateString("fr-FR")}</span>
+            {debt.description && <small>{debt.description}</small>}
+            {isHistory && debt.paid_at && <small className="debt-paid-date">Réglée le {new Date(debt.paid_at).toLocaleDateString("fr-FR")}</small>}
+          </div>
+          <div className="debt-item-right">
+            <b>{debt.amount.toLocaleString("fr-FR")} FCFA</b>
+            {!isHistory && <button type="button" className="debt-status-button" onClick={() => updateDebtStatus(debt.id, "Payée")}>Marquer payée</button>}
+          </div>
+        </article>
+      );
+      return (
+        <main className="restaurant-space">
+          <header className="restaurant-topbar"><div className="brand"><span className="brand-mark"><Store size={19} /></span><span>MENU RESTAURANT SOKONE</span></div><button className="restaurant-logout-button" onClick={handleLogout}>Se déconnecter</button></header>
+          <div className="restaurant-layout">
+            <aside className="restaurant-nav">
+              <div className="workspace-label">ESPACE RESTAURATEUR</div>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("dashboard")}><LayoutDashboard size={18} /> Tableau de bord</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("menu")}><Utensils size={18} /> Mon menu</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("orders")}><ShoppingBag size={18} /> Commande {activeOrders.length > 0 && <span className="orders-notification-badge">{activeOrders.length}</span>}</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("expenses")}><WalletCards size={18} /> Dépenses</button>
+              <button className="restaurant-nav-item restaurant-nav-active"><History size={18} /> Dettes</button>
+              <button className="restaurant-nav-item restaurant-back-admin" onClick={() => setShowRestaurateur(false)}><LayoutDashboard size={18} /> Retour administration</button>
+            </aside>
+            <section className="restaurant-content restaurant-expenses-page-content">
+              <div className="page-heading"><div><div className="eyebrow">ESPACE RESTAURATEUR</div><h1>Dettes</h1><p>Gardez une vue claire sur ce qui reste à régler et ce qui est déjà soldé.</p></div><div className="debt-page-actions"><div className="expense-total-card debt-total-card"><span>Total à payer</span><strong>{unpaidTotal.toLocaleString("fr-FR")} FCFA</strong><small>{unpaidDebts.length} dette{unpaidDebts.length > 1 ? "s" : ""} en cours</small></div><button type="button" className="secondary-button debt-history-button" onClick={() => setDebtHistoryOpen(true)}><History size={16} /> Historique des dettes <span>{paidDebts.length}</span></button></div></div>
+              {error && <div className="notice notice-warning" role="alert">{error}</div>}
+              <div className="expenses-layout debts-layout">
+                <form className="expense-form-panel" onSubmit={saveDebt}>
+                  <h2>Nouvelle dette</h2>
+                  <label>Créancier<input value={debtForm.creditor} onChange={(event) => setDebtForm((current) => ({ ...current, creditor: event.target.value }))} placeholder="Nom du fournisseur ou de la personne" required /></label>
+                  <fieldset className="debt-type-fieldset">
+                    <legend>Type de dette</legend>
+                    <label className="debt-type-option"><input type="checkbox" checked={debtForm.debt_type === "Je dois"} onChange={() => setDebtForm((current) => ({ ...current, debt_type: "Je dois" }))} /> <span>Je dois</span></label>
+                    <label className="debt-type-option"><input type="checkbox" checked={debtForm.debt_type === "On me doit"} onChange={() => setDebtForm((current) => ({ ...current, debt_type: "On me doit" }))} /> <span>On me doit</span></label>
+                  </fieldset>
+                  <label>Montant (FCFA)<input type="number" min="1" step="1" value={debtForm.amount} onChange={(event) => setDebtForm((current) => ({ ...current, amount: event.target.value }))} required /></label>
+                  <label>Description <span>(facultatif)</span><textarea value={debtForm.description} onChange={(event) => setDebtForm((current) => ({ ...current, description: event.target.value }))} rows={3} /></label>
+                  <button className="primary-button" type="submit" disabled={isSavingDebt}>{isSavingDebt ? "Enregistrement..." : "Enregistrer la dette"}</button>
+                </form>
+                <div className="debt-lists">
+                  <div className="expenses-list-panel debt-list-panel"><div className="debt-list-heading"><div><h2>À régler</h2><p>Les dettes encore ouvertes apparaissent ici.</p></div><span>{unpaidDebts.length}</span></div>{isDebtsLoading ? <LoadingIndicator label="Chargement des dettes..." /> : unpaidDebts.length ? unpaidDebts.map((debt) => renderDebtItem(debt)) : <p className="empty-state">Aucune dette à régler.</p>}</div>
+                </div>
+              </div>
+              {debtHistoryOpen && <div className="modal-backdrop" role="presentation"><div className="modal-card debt-history-modal" role="dialog" aria-modal="true" aria-labelledby="debt-history-title"><div className="modal-header"><div><div className="eyebrow">ARCHIVES</div><h2 id="debt-history-title">Historique des dettes</h2></div><button className="close-button" type="button" onClick={() => setDebtHistoryOpen(false)} aria-label="Fermer"><X size={20} /></button></div><div className="debt-history-modal-body">{isDebtsLoading ? <LoadingIndicator label="Chargement de l’historique..." /> : paidDebts.length ? paidDebts.map((debt) => renderDebtItem(debt, true)) : <p className="empty-state">Aucune dette payée pour le moment.</p>}</div></div></div>}
+            </section>
+          </div>
+        </main>
+      );
+    }
+    if (restaurantPage === "expenses") {
+      const totalExpenses = restaurantExpenses.reduce((total, expense) => total + expense.amount, 0);
+      return (
+        <main className="restaurant-space">
+          <header className="restaurant-topbar">
+            <div className="brand"><span className="brand-mark"><Store size={19} /></span><span>MENU RESTAURANT SOKONE</span></div>
+            <button className="restaurant-logout-button" onClick={handleLogout} title="Se déconnecter">Se déconnecter</button>
+          </header>
+          <div className="restaurant-layout">
+            <aside className="restaurant-nav">
+              <div className="workspace-label">ESPACE RESTAURATEUR</div>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("dashboard")}><LayoutDashboard size={18} /> Tableau de bord</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("menu")}><Utensils size={18} /> Mon menu</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("orders")}><ShoppingBag size={18} /> Commande {activeOrders.length > 0 && <span className="orders-notification-badge">{activeOrders.length}</span>}</button>
+              <button className="restaurant-nav-item restaurant-nav-active"><WalletCards size={18} /> Dépenses</button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("debts")}><WalletCards size={18} /> Dettes</button>
+              <button className="restaurant-nav-item restaurant-back-admin" onClick={() => setShowRestaurateur(false)}><LayoutDashboard size={18} /> Retour administration</button>
+            </aside>
+            <section className="restaurant-content restaurant-expenses-page-content">
+              <div className="page-heading">
+                <div><div className="eyebrow">ESPACE RESTAURATEUR</div><h1>Dépenses</h1><p>Enregistrez et suivez les dépenses de votre restaurant.</p></div>
+                <div className="expense-total-card"><span>Total des dépenses</span><strong>{totalExpenses.toLocaleString("fr-FR")} FCFA</strong></div>
+              </div>
+              {error && <div className="notice notice-warning" role="alert">{error}</div>}
+              <div className="expenses-layout">
+                <form className="expense-form-panel" onSubmit={saveExpense}>
+                  <h2>Nouvelle dépense</h2>
+                  <label>Catégorie<select value={expenseForm.category} onChange={(event) => setExpenseForm((current) => ({ ...current, category: event.target.value }))}><option>Achats</option><option>Salaires</option><option>Loyer</option><option>Électricité</option><option>Transport</option><option>Autre</option></select></label>
+                  <label>Montant (FCFA)<input type="number" min="1" step="1" value={expenseForm.amount} onChange={(event) => setExpenseForm((current) => ({ ...current, amount: event.target.value }))} required /></label>
+                  <label>Description <span>(facultatif)</span><textarea value={expenseForm.description} onChange={(event) => setExpenseForm((current) => ({ ...current, description: event.target.value }))} rows={3} /></label>
+                  <button className="primary-button" type="submit" disabled={isSavingExpense}>{isSavingExpense ? "Enregistrement..." : "Enregistrer la dépense"}</button>
+                </form>
+                <div className="expenses-list-panel">
+                  <h2>Dernières dépenses</h2>
+                  {isExpensesLoading ? <LoadingIndicator label="Chargement des dépenses..." /> : restaurantExpenses.length ? restaurantExpenses.map((expense) => (
+                    <article className="expense-item" key={expense.id}>
+                      <div><strong>{expense.category}</strong><span>{new Date(`${expense.expense_date}T12:00:00`).toLocaleDateString("fr-FR")}</span>{expense.description && <small>{expense.description}</small>}</div>
+                      <b>{expense.amount.toLocaleString("fr-FR")} FCFA</b>
+                    </article>
+                  )) : <p className="empty-state">Aucune dépense enregistrée.</p>}
+                </div>
+              </div>
+            </section>
+          </div>
+        </main>
+      );
+    }
+    if (restaurantPage === "orders") {
+      return (
+        <main className="restaurant-space">
+          <header className="restaurant-topbar">
+            <div className="brand">
+              <span className="brand-mark"><Store size={19} /></span>
+              <span>MENU RESTAURANT SOKONE</span>
+            </div>
+            <button className="restaurant-logout-button" onClick={handleLogout} title="Se déconnecter">
+              Se déconnecter
+            </button>
+          </header>
+          <div className="restaurant-layout">
+            <aside className="restaurant-nav">
+              <div className="workspace-label">ESPACE RESTAURATEUR</div>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("dashboard")}>
+                <LayoutDashboard size={18} /> Tableau de bord
+              </button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("menu")}>
+                <Utensils size={18} /> Mon menu
+              </button>
+              <button className="restaurant-nav-item restaurant-nav-active">
+                <ShoppingBag size={18} /> Commande {activeOrders.length > 0 && <span className="orders-notification-badge">{activeOrders.length}</span>}
+              </button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("expenses")}>
+                <WalletCards size={18} /> Dépenses
+              </button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("debts")}>
+                <WalletCards size={18} /> Dettes
+              </button>
+              <button className="restaurant-nav-item restaurant-back-admin" onClick={() => setShowRestaurateur(false)}>
+                <LayoutDashboard size={18} /> Retour administration
+              </button>
+            </aside>
+            <section className="restaurant-content restaurant-orders-page-content">
+              <div className="page-heading">
+                <div>
+                  <div className="eyebrow">ESPACE RESTAURATEUR</div>
+                  <h1>Commande</h1>
+                  <p>Consultez et mettez à jour les commandes de vos clients.</p>
+                </div>
+                <div className="orders-page-actions">
+                  <strong className="orders-count">{activeOrders.length} commande{activeOrders.length > 1 ? "s" : ""}</strong>
+                  <button className="secondary-button history-button" type="button" onClick={() => setOrderHistoryOpen(true)}>
+                    <History size={16} /> Historique des commandes
+                  </button>
+                </div>
+              </div>
+              {error && <div className="notice notice-warning" role="alert">{error}</div>}
+              <div className="orders-management-page-panel">
+                {isOrdersLoading ? (
+                  <LoadingIndicator label="Chargement des commandes..." />
+                ) : activeOrders.length ? (
+                  <div className="restaurant-orders-list">
+                    {activeOrders.map((order) => renderOrderCard(order))}
+                  </div>
+                ) : (
+                  <p className="empty-state">Aucune commande reçue pour le moment.</p>
+                )}
+              </div>
+            </section>
+            {orderHistoryOpen && (
+              <div className="orders-history-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setOrderHistoryOpen(false)}>
+                <div className="orders-history-modal" role="dialog" aria-modal="true" aria-labelledby="order-history-title">
+                  <div className="orders-history-header">
+                    <div>
+                      <div className="eyebrow">ARCHIVES</div>
+                      <h2 id="order-history-title">Historique des commandes</h2>
+                    </div>
+                    <button className="close-button" type="button" onClick={() => setOrderHistoryOpen(false)} aria-label="Fermer">
+                      <X size={20} />
+                    </button>
+                  </div>
+                  <div className="orders-history-body">
+                    {archivedOrders.length ? archivedOrders.map((order) => renderOrderCard(order, true)) : (
+                      <p className="empty-state">Aucune commande livrée ou annulée.</p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </main>
+      );
+    }
     return (
       <main className="restaurant-space">
         <header className="restaurant-topbar">
@@ -1182,46 +1868,37 @@ function App() {
               <Store size={19} />
             </span>
             <span>
-              Sokone<span className="brand-dot">.</span>
+              MENU RESTAURANT SOKONE
             </span>
           </div>
           <div className="restaurant-top-actions">
-            <span className="restaurant-user">{restaurateur.name}</span>
             <button
-              className="icon-button home-action"
+              className="restaurant-logout-button"
               onClick={handleLogout}
-              aria-label="Se déconnecter"
               title="Se déconnecter"
             >
-              <LogOut size={19} />
+              Se déconnecter
             </button>
           </div>
         </header>
         <div className="restaurant-layout">
           <aside className="restaurant-nav">
             <div className="workspace-label">ESPACE RESTAURATEUR</div>
-            <button className="restaurant-nav-item restaurant-nav-active" onClick={() => scrollToSection("restaurant-dashboard")}>
+            <button className="restaurant-nav-item" onClick={() => setRestaurantPage("dashboard")}>
               <LayoutDashboard size={18} /> Tableau de bord
             </button>
-            <button
-              className="restaurant-nav-item"
-              onClick={() =>
-                scrollToSection("my-menu")
-              }
-            >
+            <button className="restaurant-nav-item restaurant-nav-active" onClick={() => scrollToSection("my-menu")}>
               <Utensils size={18} /> Mon menu
             </button>
-            <button
-              className="restaurant-nav-item"
-              onClick={() =>
-                scrollToSection("today-menu")
-              }
-            >
-              <CalendarDays size={18} /> Menu du jour
+            <button className="restaurant-nav-item" onClick={() => setRestaurantPage("orders")}>
+              <ShoppingBag size={18} /> Commande {activeOrders.length > 0 && <span className="orders-notification-badge">{activeOrders.length}</span>}
             </button>
-            <button className="restaurant-nav-item" onClick={openRestaurantProfile}>
-              <Store size={18} /> Mon restaurant
-            </button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("expenses")}>
+                <WalletCards size={18} /> Dépenses
+              </button>
+              <button className="restaurant-nav-item" onClick={() => setRestaurantPage("debts")}>
+                <WalletCards size={18} /> Dettes
+              </button>
             <button
               className="restaurant-nav-item restaurant-back-admin"
               onClick={() => setShowRestaurateur(false)}
@@ -1245,7 +1922,9 @@ function App() {
             {error && <div className="notice notice-warning" role="alert">{error}</div>}
             <section className="restaurant-identity">
               <div className="restaurant-cover">
-                <Store size={40} />
+                {restaurateur.photo_url && (
+                  <img src={restaurateur.photo_url} alt={`Photo de ${restaurateur.name}`} />
+                )}
               </div>
               <div className="restaurant-identity-info">
                 <div>
@@ -1253,14 +1932,17 @@ function App() {
                   <p>
                     <MapPin size={14} /> {restaurateur.address}
                   </p>
+                  <p>
+                    <Phone size={14} /> {restaurateur.phone}
+                  </p>
                 </div>
                 <span className={`status-pill status-${restaurateur.status}`}>
                   {restaurateur.status === "active" ? "Ouvert" : "Fermé"}
                 </span>
+                <button className="secondary-button status-toggle-button" onClick={() => toggleStatus(restaurateur)}>
+                  <Store size={15} /> {restaurateur.status === "active" ? "Fermer" : "Ouvrir"}
+                </button>
               </div>
-              <button className="secondary-button status-toggle-button" onClick={() => toggleStatus(restaurateur)}>
-                <Store size={15} /> {restaurateur.status === "active" ? "Fermer" : "Ouvrir"}
-              </button>
             </section>
             <section className="stats-grid restaurant-stats">
               <div className="stat-card">
@@ -1620,11 +2302,15 @@ function App() {
           <div className="order-tracking-panel">
             <div className="eyebrow text-orange-500">SUIVI DE COMMANDE</div>
             <h2>Retrouvez votre commande</h2>
-            <p>Entrez votre numéro de commande pour connaître son état.</p>
+            <p>Entrez votre numéro de commande et le téléphone utilisé pour vérifier son état.</p>
             <form className="tracking-form" onSubmit={trackOrder}>
               <label>
                 Entrez votre numéro de commande
                 <input value={trackingNumber} onChange={(event) => setTrackingNumber(event.target.value)} placeholder="Exemple : SM-2847" required />
+              </label>
+              <label>
+                Numéro de téléphone
+                <input type="tel" inputMode="numeric" autoComplete="tel" value={trackingPhone} onChange={(event) => setTrackingPhone(event.target.value.replace(/[^0-9 ]/g, ""))} placeholder="7X XXX XX XX" pattern="7[0-9](?: ?[0-9]){7}" title="Entrez le numéro utilisé lors de la commande" required />
               </label>
               <button className="order-submit-button" type="submit" disabled={trackingLoading || !supabase}>
                 {trackingLoading ? "Recherche..." : "Suivre la commande"}
@@ -1632,10 +2318,12 @@ function App() {
             </form>
             {trackingError && <p className="order-error">{trackingError}</p>}
             {trackedOrder && (
-              <div className="tracked-order-result">
+              <div className="tracked-order-result tracked-order-details">
+                <div className="tracked-order-restaurant"><span>Restaurant</span><strong>{trackedOrder.restaurantName}</strong></div>
                 <div><span>Commande</span><strong>{`SM-${String(trackedOrder.id).padStart(4, "0")}`}</strong></div>
                 <div><span>Statut</span><strong className="tracked-order-status">{trackedOrder.status}</strong></div>
                 <div><span>Total</span><strong>{trackedOrder.total_amount.toLocaleString("fr-FR")} FCFA</strong></div>
+                <section className="tracked-order-items"><h3>Détails de la commande</h3>{trackedOrder.items.length ? trackedOrder.items.map((item, index) => <div className="tracked-order-item" key={`${item.name}-${index}`}><strong>{item.quantity} × {item.name}</strong><b>{(item.quantity * item.unit_price).toLocaleString("fr-FR")} FCFA</b></div>) : <p>Aucun détail disponible pour cette commande.</p>}{trackedOrder.notes && <div className="tracked-order-note"><span>Note</span><p>{trackedOrder.notes}</p></div>}</section>
               </div>
             )}
           </div>
@@ -1865,7 +2553,7 @@ function App() {
                       </label>
                       <label>
                         Téléphone
-                        <input type="tel" value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value)} required />
+                        <input type="tel" inputMode="numeric" autoComplete="tel" placeholder="7X XXX XX XX" pattern="7[0-9](?: ?[0-9]){7}" title="Entrez un numéro de 9 chiffres commençant par 7" value={customerPhone} onChange={(event) => setCustomerPhone(event.target.value.replace(/[^0-9 ]/g, ""))} required />
                       </label>
                       <label className="delivery-option">
                         <span className="delivery-option-label">
@@ -1883,6 +2571,10 @@ function App() {
                           <input value={deliveryAddress} onChange={(event) => setDeliveryAddress(event.target.value)} required />
                         </label>
                       )}
+                      <label className="order-address-field">
+                        Note <span>(facultatif)</span>
+                        <textarea value={orderNotes} onChange={(event) => setOrderNotes(event.target.value)} maxLength={300} rows={3} placeholder="Exemple : sans oignons, appeler à l’arrivée..." />
+                      </label>
                       <fieldset className="payment-fieldset">
                         <legend>Mode de paiement</legend>
                         <label className="payment-option">
